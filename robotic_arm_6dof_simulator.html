@@ -1,0 +1,333 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0a0e15; color: #c9d1d9; font-family: 'Courier New', monospace; overflow: hidden; }
+input[type=range] { -webkit-appearance: none; width: 100%; height: 3px; background: #1f2937; border-radius: 2px; outline: none; cursor: pointer; }
+input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #e05a0a; cursor: pointer; }
+input[type=range]::-webkit-slider-track { background: transparent; }
+input[type=text] { background: #111827; color: #9ca3af; border: 1px solid #1f2937; border-radius: 4px; padding: 3px 6px; font-size: 9px; font-family: 'Courier New', monospace; width: 100%; outline: none; }
+button { cursor: pointer; font-family: 'Courier New', monospace; border: none; outline: none; }
+::-webkit-scrollbar { width: 3px; } ::-webkit-scrollbar-track { background: #0d1117; } ::-webkit-scrollbar-thumb { background: #374151; }
+</style>
+</head>
+<body>
+<div id="root" style="display:flex;height:640px;overflow:hidden;background:#0a0e15"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const R = Math.PI/180;
+const JD = [
+  {name:"Base",     axis:"y",min:-180,max:180},
+  {name:"Shoulder", axis:"z",min:-120,max:80},
+  {name:"Elbow",    axis:"z",min:-135,max:135},
+  {name:"W.Pitch",  axis:"z",min:-90, max:90},
+  {name:"W.Roll",   axis:"y",min:-180,max:180},
+  {name:"Gripper",  axis:"z",min:0,   max:80},
+];
+const HOME = [0,40,-90,50,0,20];
+let joints = [...HOME];
+let logEntries = [];
+let torques = HOME.map(()=>0);
+let vels = HOME.map(()=>0);
+let wsConn = null, wsStatus = "off";
+let wsUrl = "ws://localhost:3000/ws";
+
+function fk(a) {
+  const [L1,L2,L3]=[1.1,0.9,0.52];
+  const r=a[0]*R,t1=a[1]*R,t2=t1+a[2]*R,t3=t2+a[3]*R;
+  const reach=L1*Math.cos(t1)+L2*Math.cos(t2)+L3*Math.cos(t3);
+  const y=0.82+L1*Math.sin(t1)+L2*Math.sin(t2)+L3*Math.sin(t3);
+  return{x:(reach*Math.sin(r)).toFixed(3),y:y.toFixed(3),z:(reach*Math.cos(r)).toFixed(3)};
+}
+
+// ── Build DOM ──────────────────────────────────────────────────────────────
+const root = document.getElementById('root');
+root.innerHTML = `
+<div id="left" style="width:206px;background:#090d14;border-right:1px solid #1a2535;display:flex;flex-direction:column;overflow-y:auto;flex-shrink:0">
+  <div style="color:#e05a0a;font-size:10px;font-weight:700;letter-spacing:.15em;padding:10px 12px 6px;border-bottom:1px solid #1a2535">JOINT CONTROL</div>
+  <div id="sliders" style="padding:8px 12px;display:flex;flex-direction:column;gap:5px"></div>
+  <div style="padding:0 12px 8px;display:flex;flex-direction:column;gap:5px">
+    <button id="btnHome" style="background:#e05a0a;color:#fff;border-radius:5px;padding:7px 0;font-size:11px;font-weight:700;letter-spacing:.1em">HOME POSITION</button>
+    <div style="display:flex;gap:5px">
+      <button id="btnRnd" style="flex:1;background:#0f2038;color:#5096c8;border:1px solid #1a3a5c;border-radius:5px;padding:6px 0;font-size:10px">RANDOM</button>
+      <button id="btnZero" style="flex:1;background:transparent;color:#6b7280;border:1px solid #1a2535;border-radius:5px;padding:6px 0;font-size:10px">ZERO</button>
+    </div>
+  </div>
+  <div style="margin-top:auto;border-top:1px solid #1a2535;padding:10px 12px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <span style="font-size:9px;color:#6b7280">SERVER LINK</span>
+      <span id="wsLabel" style="font-size:9px;font-weight:700;color:#4b5563">⬤ OFF</span>
+    </div>
+    <input type="text" id="wsUrlInput" value="ws://localhost:3000/ws"/>
+    <div style="display:flex;gap:5px;margin-top:5px">
+      <button id="btnWs" style="flex:1;background:#0f2038;color:#5096c8;border:1px solid #1a3a5c;border-radius:4px;padding:5px 0;font-size:9px">CONNECT</button>
+    </div>
+  </div>
+</div>
+<div id="canvasWrap" style="flex:1;position:relative;min-width:0">
+  <canvas id="c" style="width:100%;height:100%;display:block"></canvas>
+  <div style="position:absolute;top:0;left:0;right:0;padding:8px 14px;pointer-events:none;background:linear-gradient(to bottom,rgba(9,13,20,.92),transparent)">
+    <span style="color:#e05a0a;font-weight:700;font-size:14px;letter-spacing:.08em">ROBOTIC ARM</span>
+    <span style="color:#374151;margin-left:6px;font-size:10px">SIM v1.0</span>
+    <span style="margin-left:10px;background:#0b2412;border:1px solid #1a5230;border-radius:3px;padding:1px 5px;font-size:9px;color:#22c55e">6-DOF</span>
+  </div>
+  <div id="eeOverlay" style="position:absolute;bottom:10px;left:10px;background:rgba(9,13,20,.88);border:1px solid #1a2535;border-radius:6px;padding:6px 10px;pointer-events:none">
+    <div style="font-size:9px;color:#4b5563;margin-bottom:3px">END EFFECTOR</div>
+    <div id="eePos" style="display:flex;gap:10px;font-size:11px"></div>
+  </div>
+  <div style="position:absolute;bottom:10px;right:10px;color:#1f2937;font-size:9px;pointer-events:none">DRAG · SCROLL ZOOM</div>
+</div>
+<div id="right" style="width:244px;background:#090d14;border-left:1px solid #1a2535;display:flex;flex-direction:column;flex-shrink:0">
+  <div style="color:#e05a0a;font-size:10px;font-weight:700;letter-spacing:.15em;padding:10px 12px 6px;border-bottom:1px solid #1a2535">SENSOR DATA</div>
+  <div style="padding:8px 12px">
+    <div style="font-size:9px;color:#4b5563;margin-bottom:5px">JOINT POSITIONS</div>
+    <div id="jointBars" style="display:flex;flex-direction:column;gap:3px"></div>
+    <div style="font-size:9px;color:#4b5563;margin-top:8px;margin-bottom:4px">TORQUES (Nm)</div>
+    <div id="torqueChips" style="display:flex;flex-wrap:wrap;gap:3px"></div>
+    <div style="font-size:9px;color:#4b5563;margin-top:8px;margin-bottom:4px">VELOCITY (rad/s)</div>
+    <div id="velChips" style="display:flex;flex-wrap:wrap;gap:3px"></div>
+  </div>
+  <div style="flex:1;border-top:1px solid #1a2535;display:flex;flex-direction:column;min-height:0">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px 4px">
+      <span style="font-size:10px;color:#e05a0a;font-weight:700;letter-spacing:.15em">API LOG</span>
+      <button id="btnClear" style="background:none;color:#374151;font-size:9px;font-family:'Courier New',monospace">CLEAR</button>
+    </div>
+    <div id="apiLog" style="flex:1;overflow-y:auto;padding:4px 12px;display:flex;flex-direction:column;gap:3px"></div>
+  </div>
+  <div style="border-top:1px solid #1a2535;padding:8px 12px;background:#070b11">
+    <div style="font-size:9px;color:#374151;margin-bottom:4px;letter-spacing:.08em">REST · localhost:3000</div>
+    <div id="apiRef"></div>
+  </div>
+</div>`;
+
+// ── Build sliders ──────────────────────────────────────────────────────────
+const slidersEl = document.getElementById('sliders');
+JD.forEach((d,i)=>{
+  const div = document.createElement('div');
+  div.style.cssText = 'background:#111827;border-radius:5px;border:1px solid #1a2535;padding:6px 8px';
+  div.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+      <span style="font-size:10px;color:#6b7280">J${i+1}&nbsp;${d.name}</span>
+      <span id="sv${i}" style="font-size:11px;color:#e05a0a;font-weight:700">${joints[i]>0?'+':''}${joints[i].toFixed(1)}°</span>
+    </div>
+    <input type="range" id="sl${i}" min="${d.min}" max="${d.max}" step="0.5" value="${joints[i]}">
+    <div style="display:flex;justify-content:space-between;font-size:9px;color:#374151;margin-top:2px"><span>${d.min}°</span><span>${d.max}°</span></div>`;
+  slidersEl.appendChild(div);
+  document.getElementById(`sl${i}`).addEventListener('input',e=>{
+    joints[i] = parseFloat(e.target.value);
+    document.getElementById(`sv${i}`).textContent = (joints[i]>0?'+':'')+joints[i].toFixed(1)+'°';
+    updateArm(); addLog('POST',`/api/arm/joint/${i}`,{angle:joints[i]});
+  });
+});
+
+// ── API Ref ────────────────────────────────────────────────────────────────
+const refs = [["GET","/api/arm/state"],["POST","/api/arm/joint/:id"],["POST","/api/arm/joints"],["POST","/api/arm/home"],["GET","/api/arm/sensors"],["WS","/ws"],["MCP","/mcp"]];
+document.getElementById('apiRef').innerHTML = refs.map(([m,e])=>`<div style="display:flex;gap:5px;font-size:9px;margin-bottom:2px"><span style="color:${m==='GET'?'#1d4ed8':m==='WS'?'#15803d':m==='MCP'?'#7c3aed':'#9a3412'};min-width:28px">${m}</span><span style="color:#374151">${e}</span></div>`).join('');
+
+// ── Buttons ────────────────────────────────────────────────────────────────
+document.getElementById('btnHome').onclick = ()=>{ joints=[...HOME]; updateSliders(); updateArm(); addLog('POST','/api/arm/home',{}); };
+document.getElementById('btnRnd').onclick = ()=>{ joints=JD.map(d=>parseFloat((d.min+Math.random()*(d.max-d.min)).toFixed(1))); updateSliders(); updateArm(); addLog('POST','/api/arm/joints',{angles:joints}); };
+document.getElementById('btnZero').onclick = ()=>{ joints=new Array(6).fill(0); updateSliders(); updateArm(); addLog('POST','/api/arm/joints',{angles:joints}); };
+document.getElementById('btnClear').onclick = ()=>{ logEntries=[]; renderLog(); };
+document.getElementById('btnWs').onclick = ()=>{ wsStatus==='live'?disconnectWs():connectWs(); };
+document.getElementById('wsUrlInput').addEventListener('input',e=>wsUrl=e.target.value);
+
+function updateSliders(){
+  JD.forEach((_,i)=>{
+    document.getElementById(`sl${i}`).value = joints[i];
+    document.getElementById(`sv${i}`).textContent=(joints[i]>0?'+':'')+joints[i].toFixed(1)+'°';
+  });
+}
+
+// ── WS ────────────────────────────────────────────────────────────────────
+const wsColors={off:'#4b5563',connecting:'#ca8a04',live:'#16a34a',error:'#dc2626'};
+const wsLabels={off:'⬤ OFF',connecting:'⬤ CONNECTING',live:'⬤ LIVE',error:'⬤ ERROR'};
+function updateWsLabel(){ const el=document.getElementById('wsLabel'); el.textContent=wsLabels[wsStatus]; el.style.color=wsColors[wsStatus]; document.getElementById('btnWs').textContent=wsStatus==='live'?'DISCONNECT':'CONNECT'; }
+function connectWs(){
+  if(wsConn) wsConn.close();
+  wsStatus='connecting'; updateWsLabel();
+  try{
+    wsConn=new WebSocket(document.getElementById('wsUrlInput').value);
+    wsConn.onopen=()=>{ wsStatus='live'; updateWsLabel(); addLog('WS','CONNECTED',{}); };
+    wsConn.onmessage=e=>{ try{ const m=JSON.parse(e.data); if(m.type==='state'&&Array.isArray(m.data?.joints)){ joints=m.data.joints; updateSliders(); updateArm(); } }catch{} };
+    wsConn.onclose=()=>{ wsStatus='off'; wsConn=null; updateWsLabel(); };
+    wsConn.onerror=()=>{ wsStatus='error'; updateWsLabel(); };
+  }catch{ wsStatus='error'; updateWsLabel(); }
+}
+function disconnectWs(){ wsConn?.close(); wsConn=null; wsStatus='off'; updateWsLabel(); }
+
+// ── Log ───────────────────────────────────────────────────────────────────
+function addLog(m,ep,body){
+  logEntries.unshift({id:Date.now(),t:new Date().toLocaleTimeString('en',{hour12:false}),m,ep,body});
+  if(logEntries.length>40) logEntries.length=40;
+  renderLog();
+}
+function renderLog(){
+  const el=document.getElementById('apiLog');
+  if(!logEntries.length){ el.innerHTML='<div style="font-size:10px;color:#374151;font-style:italic;margin-top:4px">No API calls yet…</div>'; return; }
+  el.innerHTML=logEntries.map(e=>{
+    const bStr=JSON.stringify(e.body); const bShort=bStr.length>55?bStr.slice(0,55)+'…':bStr;
+    return `<div style="background:#0d1520;border:1px solid #1a2535;border-radius:4px;padding:3px 6px;font-size:9px">
+      <div style="display:flex;gap:5px"><span style="color:${e.m==='GET'?'#3b82f6':e.m==='WS'?'#22c55e':'#e05a0a'};font-weight:700">${e.m}</span><span style="color:#4ade80;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${e.ep}</span></div>
+      ${Object.keys(e.body).length?`<div style="color:#374151;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${bShort}</div>`:''}
+    </div>`;
+  }).join('');
+}
+renderLog();
+
+// ── Sensors ───────────────────────────────────────────────────────────────
+function renderSensors(){
+  const hues=[20,42,64,86,108,130];
+  document.getElementById('jointBars').innerHTML=joints.map((a,i)=>{
+    const pct=((a-JD[i].min)/(JD[i].max-JD[i].min))*100;
+    return `<div style="display:flex;align-items:center;gap:5px"><span style="font-size:9px;color:#4b5563;width:16px">J${i+1}</span><div style="flex:1;height:4px;background:#1a2535;border-radius:2px"><div style="height:100%;width:${pct.toFixed(1)}%;background:hsl(${hues[i]},70%,55%);border-radius:2px;transition:width .08s"></div></div><span style="font-size:9px;color:#9ca3af;min-width:40px;text-align:right">${a.toFixed(1)}°</span></div>`;
+  }).join('');
+  document.getElementById('torqueChips').innerHTML=torques.map((t,i)=>`<div style="background:#111827;border:1px solid #1a2535;border-radius:3px;padding:2px 5px;font-size:9px"><span style="color:#4b5563">J${i+1} </span><span style="color:#ca8a04">${t}</span></div>`).join('');
+  document.getElementById('velChips').innerHTML=vels.map((v,i)=>`<div style="background:#111827;border:1px solid #1a2535;border-radius:3px;padding:2px 5px;font-size:9px"><span style="color:#4b5563">J${i+1} </span><span style="color:${v>=0?'#3b82f6':'#ef4444'}">${v>0?'+':''}${v}</span></div>`).join('');
+  const ee=fk(joints);
+  document.getElementById('eePos').innerHTML=[['X',ee.x],['Y',ee.y],['Z',ee.z]].map(([ax,v])=>`<span><span style="color:#4b5563">${ax}: </span><span style="color:#22c55e">${v}</span><span style="color:#374151;font-size:9px">m</span></span>`).join('');
+}
+renderSensors();
+
+setInterval(()=>{
+  torques=joints.map(a=>parseFloat((Math.abs(a)*0.012+Math.random()*0.04).toFixed(3)));
+  vels=joints.map(()=>parseFloat((Math.random()*0.016-0.008).toFixed(4)));
+  renderSensors();
+},600);
+
+// ── Three.js ──────────────────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({canvas,antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.shadowMap.enabled=true;
+renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0e15);
+scene.fog = new THREE.FogExp2(0x0a0e15,0.05);
+
+const camera = new THREE.PerspectiveCamera(45,1,0.01,50);
+let theta=0.55,phi=1.18,rad=6.5,drag=false,lx=0,ly=0;
+function setCamera(){const sp=Math.sin(phi);camera.position.set(rad*sp*Math.sin(theta),rad*Math.cos(phi)+1.5,rad*sp*Math.cos(theta));camera.lookAt(0,1.5,0);}
+setCamera();
+
+canvas.addEventListener('mousedown',e=>{drag=true;lx=e.clientX;ly=e.clientY;});
+window.addEventListener('mouseup',()=>drag=false);
+canvas.addEventListener('mousemove',e=>{if(!drag)return;theta-=(e.clientX-lx)*0.007;phi=Math.max(.25,Math.min(1.5,phi+(e.clientY-ly)*0.007));lx=e.clientX;ly=e.clientY;setCamera();});
+canvas.addEventListener('wheel',e=>{rad=Math.max(2.5,Math.min(14,rad+e.deltaY*0.004));setCamera();e.preventDefault();},{passive:false});
+
+// Touch support
+let t0=null;
+canvas.addEventListener('touchstart',e=>{if(e.touches.length===1){drag=true;lx=e.touches[0].clientX;ly=e.touches[0].clientY;}},{passive:true});
+canvas.addEventListener('touchend',()=>{drag=false;t0=null;});
+canvas.addEventListener('touchmove',e=>{
+  if(e.touches.length===1&&drag){theta-=(e.touches[0].clientX-lx)*0.007;phi=Math.max(.25,Math.min(1.5,phi+(e.touches[0].clientY-ly)*0.007));lx=e.touches[0].clientX;ly=e.touches[0].clientY;setCamera();}
+},{passive:true});
+
+// Lighting
+scene.add(new THREE.AmbientLight(0xffffff,0.45));
+const sun=new THREE.DirectionalLight(0xffffff,0.9);
+sun.position.set(4,7,4);sun.castShadow=true;
+sun.shadow.camera.near=0.1;sun.shadow.camera.far=20;
+[sun.shadow.camera.left,sun.shadow.camera.right,sun.shadow.camera.top,sun.shadow.camera.bottom]=[-5,5,8,-2];
+sun.shadow.mapSize.width=sun.shadow.mapSize.height=1024;
+scene.add(sun);
+const fill=new THREE.DirectionalLight(0x5566aa,.3);fill.position.set(-3,3,-4);scene.add(fill);
+const rim=new THREE.PointLight(0xff5500,.5,14);rim.position.set(-3,4,3);scene.add(rim);
+
+scene.add(new THREE.GridHelper(10,20,0x111a28,0x0d1520));
+const floor=new THREE.Mesh(new THREE.PlaneGeometry(10,10),new THREE.MeshLambertMaterial({color:0x07090e}));
+floor.rotation.x=-Math.PI/2;floor.receiveShadow=true;scene.add(floor);
+
+// ── Arm geometry ───────────────────────────────────────────────────────────
+const mW=new THREE.MeshPhongMaterial({color:0xdadada,specular:0x888888,shininess:130});
+const mD=new THREE.MeshPhongMaterial({color:0x222222,specular:0x0a0a0a,shininess:60});
+const mJ=new THREE.MeshPhongMaterial({color:0x383838,specular:0x222222,shininess:90});
+
+function cyl(rt,rb,h,m,s=16){const mesh=new THREE.Mesh(new THREE.CylinderGeometry(rt,rb,h,s),m);mesh.castShadow=true;return mesh;}
+function sph(r,m,s=16){const mesh=new THREE.Mesh(new THREE.SphereGeometry(r,s,12),m);mesh.castShadow=true;return mesh;}
+function bx(w,h,d,m){const mesh=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m);mesh.castShadow=true;return mesh;}
+
+const g=Array.from({length:6},()=>new THREE.Group());
+scene.add(g[0]);
+
+// Base
+const bBot=cyl(.44,.44,.05,mD,32);bBot.position.y=.025;g[0].add(bBot);
+const bPed=cyl(.31,.39,.46,mW,24);bPed.position.y=.26;g[0].add(bPed);
+const bRingLo=cyl(.34,.34,.04,mD,24);bRingLo.position.y=.49;g[0].add(bRingLo);
+const bTop=cyl(.23,.27,.28,mW,24);bTop.position.y=.65;g[0].add(bTop);
+const bRingHi=cyl(.25,.25,.03,mD,24);bRingHi.position.y=.80;g[0].add(bRingHi);
+
+// Shoulder
+g[1].position.y=.82;g[0].add(g[1]);
+const sSph=sph(.19,mJ);g[1].add(sSph);
+const sRing=cyl(.215,.215,.045,mD,24);sRing.rotation.z=Math.PI/2;g[1].add(sRing);
+const sBox=bx(.27,.24,.24,mD);sBox.position.set(.165,0,0);g[1].add(sBox);
+const sLink=cyl(.095,.14,1.1,mW);sLink.position.y=.55;g[1].add(sLink);
+// ribs on upper arm
+for(let y of[.2,.4,.6,.8]){const rib=cyl(.145,.145,.025,mD,16);rib.position.y=y;g[1].add(rib);}
+
+// Elbow
+g[2].position.y=1.1;g[1].add(g[2]);
+const eSph=sph(.16,mJ);g[2].add(eSph);
+const eRing=cyl(.18,.18,.04,mD,24);eRing.rotation.z=Math.PI/2;g[2].add(eRing);
+const eBox=bx(.24,.22,.22,mD);eBox.position.set(.13,0,0);g[2].add(eBox);
+const eLink=cyl(.075,.11,.92,mW);eLink.position.y=.46;g[2].add(eLink);
+for(let y of[.15,.35,.55,.75]){const rib=cyl(.115,.115,.02,mD,16);rib.position.y=y;g[2].add(rib);}
+
+// Wrist Pitch
+g[3].position.y=.92;g[2].add(g[3]);
+const wSph=sph(.12,mJ);g[3].add(wSph);
+const wBox=bx(.19,.17,.17,mD);wBox.position.set(.09,0,0);g[3].add(wBox);
+const wNeck=cyl(.065,.085,.28,mW);wNeck.position.y=.14;g[3].add(wNeck);
+
+// Wrist Roll
+g[4].position.y=.28;g[3].add(g[4]);
+const rDisc=cyl(.10,.10,.06,mD,24);g[4].add(rDisc);
+const rNeck=cyl(.055,.065,.18,mW);rNeck.position.y=.12;g[4].add(rNeck);
+
+// Gripper
+g[5].position.y=.19;g[4].add(g[5]);
+const gPalm=cyl(.09,.09,.06,mD,8);gPalm.position.y=.04;g[5].add(gPalm);
+const gPlate=bx(.2,.04,.1,mW);gPlate.position.y=.08;g[5].add(gPlate);
+// Sensor dots on gripper
+for(let x of[-.04,0,.04]){const dot=new THREE.Mesh(new THREE.SphereGeometry(.008,6,4),new THREE.MeshBasicMaterial({color:0x303030}));dot.position.set(x,.115,.051);g[5].add(dot);}
+
+const fingers=[];
+for(const side of[-1,1]){
+  const fg=new THREE.Group();fg.position.set(side*.055,.12,0);fg.userData.side=side;
+  const fb=cyl(.022,.028,.18,mW,8);fb.position.y=.09;fg.add(fb);
+  const ft=cyl(.012,.022,.1,mD,8);ft.position.y=.23;fg.add(ft);
+  fingers.push(fg);g[5].add(fg);
+}
+// EE indicator
+const eeM=new THREE.Mesh(new THREE.SphereGeometry(.02,8,6),new THREE.MeshBasicMaterial({color:0x00e887}));
+eeM.position.y=.33;g[5].add(eeM);
+
+function applyAngles(a){
+  g[0].rotation.y=a[0]*R;
+  g[1].rotation.z=a[1]*R;
+  g[2].rotation.z=a[2]*R;
+  g[3].rotation.z=a[3]*R;
+  g[4].rotation.y=a[4]*R;
+  fingers[0].rotation.z= a[5]*R*.55;
+  fingers[1].rotation.z=-a[5]*R*.55;
+}
+
+function updateArm(){
+  applyAngles(joints);
+  renderSensors();
+}
+applyAngles(HOME);
+
+// ── Resize + animate ────────────────────────────────────────────────────────
+function onResize(){
+  const w=canvas.clientWidth,h=canvas.clientHeight;
+  if(canvas.width!==w||canvas.height!==h){renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();}
+}
+(function animate(){requestAnimationFrame(animate);onResize();renderer.render(scene,camera);})();
+</script>
+</body>
+</html>
