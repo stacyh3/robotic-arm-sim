@@ -7,17 +7,17 @@ A 6-DOF robotic arm simulator with a 3D web UI and a server exposing REST, WebSo
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────┐
+┌───────────────────────────────────────────────────────┐
 │  3D Browser UI  (Three.js — open simulator/index.html)│
-└───────────────────────┬──────────────────────────────┘
+└───────────────────────┬───────────────────────────────┘
                         │ WebSocket ws://localhost:3000/ws
-┌──────────────────────────────────────────────────────┐
+┌───────────────────────────────────────────────────────┐
 │            Node.js Server  (server/server.js)         │
-│                                                        │
-│  REST  http://localhost:3000/api/arm/*                 │
-│  WS    ws://localhost:3000/ws                          │
-│  MCP   http://localhost:3000/mcp   (stateless)         │
-│  MCP   http://localhost:3000/mcp/sse  (SSE transport)  │
+│                                                       │
+│  REST  http://localhost:3000/api/arm/*                │
+│  WS    ws://localhost:3000/ws                         │
+│  MCP   http://localhost:3000/mcp   (stateless)        │
+│  MCP   http://localhost:3000/mcp/sse  (SSE transport) │
 └──────────┬───────────────┬─────────────────┬──────────┘
            │               │                 │
      C# Client       Python Client     LLM / Claude
