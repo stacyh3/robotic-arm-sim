@@ -8,11 +8,11 @@ A 6-DOF robotic arm simulator with a 3D web UI and a server exposing REST, WebSo
 
 ```
 ┌───────────────────────────────────────────────────────┐
-│  3D Browser UI  (Three.js — open simulator/index.html)│
+│  3D Browser UI  (Three.js — open robotic_arm_6dof_simulator.html)│
 └───────────────────────┬───────────────────────────────┘
                         │ WebSocket ws://localhost:3000/ws
 ┌───────────────────────────────────────────────────────┐
-│            Node.js Server  (server/server.js)         │
+│ ASP.NET Core Server (src/RoboticArmServer/Program.cs) │
 │                                                       │
 │  REST  http://localhost:3000/api/arm/*                │
 │  WS    ws://localhost:3000/ws                         │
@@ -21,7 +21,7 @@ A 6-DOF robotic arm simulator with a 3D web UI and a server exposing REST, WebSo
 └──────────┬───────────────┬─────────────────┬──────────┘
            │               │                 │
      C# Client       Python Client     LLM / Claude
-  (clients/*.cs)   (clients/*.py)   (via MCP tool server)
+   (src/RoboticArmClient) (src/python/robotic_arm_client) (via MCP tool server)
 ```
 
 ---
@@ -31,16 +31,14 @@ A 6-DOF robotic arm simulator with a 3D web UI and a server exposing REST, WebSo
 ### 1. Run the server
 
 ```bash
-cd server
-npm install
-node server.js
+dotnet run --project src/RoboticArmServer/RoboticArmServer.csproj
 ```
 
 The server starts at `http://localhost:3000`.
 
 ### 2. Open the 3D UI
 
-Open `simulator/index.html` in a browser (or use the Claude artifact above).  
+Open `robotic_arm_6dof_simulator.html` in a browser (or use the Claude artifact above).  
 Click **CONNECT** in the sidebar to link the UI to the server via WebSocket.
 
 ---
@@ -143,26 +141,34 @@ Then you can say to Claude:
 ## C# Client
 
 ```csharp
-// No NuGet needed — uses System.Net.Http + System.Net.WebSockets
+// No NuGet needed - uses System.Net.Http + System.Net.WebSockets
 await using var arm = new RoboticArmClient("http://localhost:3000");
 
 var state = await arm.GetStateAsync();
-await arm.SetJointAsync(0, 45);          // Base to 45°
+await arm.SetJointAsync(0, 45);          // Base to 45 deg
 await arm.SetJointsAsync([0,30,-60,40,0,20]);
 await arm.HomeAsync();
 
 var sensors = await arm.GetSensorsAsync();
 foreach (var j in sensors.Joints)
-    Console.WriteLine($"{j.Name}: {j.AngleDeg:F1}° {j.TorqueNm:F3}Nm");
+    Console.WriteLine($"{j.Name}: {j.AngleDeg:F1} deg {j.TorqueNm:F3}Nm");
 
-// WebSocket — live control
+// WebSocket - live control
 await using var ws = await arm.ConnectWebSocketAsync(s =>
     Console.WriteLine($"Joints: {string.Join(",", s.Joints)}"));
 await ws.SetJointAsync(1, 60);
 await ws.HomeAsync();
 ```
 
-Drop `RoboticArmClient.cs` into any .NET 7+ project.
+Library project: `src/RoboticArmClient/RoboticArmClient.csproj`
+
+Demo console app: `src/RoboticArmClient.Demo/RoboticArmClient.Demo.csproj`
+
+Run the demo with:
+
+```bash
+dotnet run --project src/RoboticArmClient.Demo/RoboticArmClient.Demo.csproj
+```
 
 ---
 
@@ -180,7 +186,7 @@ with RoboticArmClient("http://localhost:3000") as arm:
     arm.set_joint(0, 45)
     s = arm.get_sensors()
     for j in s.joints:
-        print(f"{j.name}: {j.angle_deg:.1f}° {j.torque_nm:.3f}Nm")
+        print(f"{j.name}: {j.angle_deg:.1f} deg {j.torque_nm:.3f}Nm")
 
     # Sequence
     arm.run_sequence([
@@ -190,6 +196,16 @@ with RoboticArmClient("http://localhost:3000") as arm:
     ])
 ```
 
+Library module: `src/python/robotic_arm_client`
+
+Demo script: `src/python/demo_client.py`
+
+Run the demo with:
+
+```bash
+python src/python/demo_client.py
+```
+
 For async usage use `AsyncRoboticArmClient` with the same API but `await`.
 
 ---
@@ -197,13 +213,19 @@ For async usage use `AsyncRoboticArmClient` with the same API but `await`.
 ## File Layout
 
 ```
-robotic-arm-sim/
-├── server/
-│   ├── server.js        ← Node.js server (REST + WS + MCP)
-│   └── package.json
-├── clients/
-│   ├── RoboticArmClient.cs   ← C# client (.NET 7+)
-│   └── robotic_arm_client.py ← Python client
+RoboticArmSim/
+├── src/
+│   ├── RoboticArmServer/            ← ASP.NET Core server (REST + WS + MCP)
+│   ├── RoboticArmSim.AppHost/       ← Aspire AppHost
+│   ├── RoboticArmSim.ServiceDefaults/
+│   ├── RoboticArmClient/            ← C# reusable client library
+│   ├── RoboticArmClient.Demo/       ← C# demo console app
+│   └── python/
+│       ├── robotic_arm_client/      ← Python reusable client library
+│       └── demo_client.py           ← Python demo script
+├── tests/
+│   └── RoboticArmServer.Tests/
+├── RoboticArmSim.slnx
 └── README.md
 ```
 
@@ -211,7 +233,7 @@ robotic-arm-sim/
 
 ## Extending
 
-- **Add more sensors** — edit `getSensors()` in `server.js`
+- **Add more sensors** — edit `GetSensors()` in `src/RoboticArmServer/Services/ArmSimulatorService.cs`
 - **Inverse kinematics** — add a `POST /api/arm/ik` endpoint accepting `{x,y,z}` target
 - **Record & replay** — log `set_joints` calls to a file, replay via `/api/arm/sequence`
 - **Real hardware** — replace `armState.joints` reads/writes with serial port calls to an Arduino

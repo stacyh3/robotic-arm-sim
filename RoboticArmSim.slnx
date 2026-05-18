@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/RoboticArmClient.Demo/RoboticArmClient.Demo.csproj" />
+    <Project Path="src/RoboticArmClient/RoboticArmClient.csproj" />
+    <Project Path="src/RoboticArmServer/RoboticArmServer.csproj" />
+    <Project Path="src/RoboticArmSim.AppHost/RoboticArmSim.AppHost.csproj" />
+    <Project Path="src/RoboticArmSim.ServiceDefaults/RoboticArmSim.ServiceDefaults.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/RoboticArmServer.Tests/RoboticArmServer.Tests.csproj" />
+  </Folder>
+</Solution>
